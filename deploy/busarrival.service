@@ -1,0 +1,17 @@
+[Unit]
+Description=Suseo bus arrival collector
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/suseo-bus-collector
+EnvironmentFile=/opt/suseo-bus-collector/.env
+ExecStart=/opt/suseo-bus-collector/.venv/bin/python -m busarrival -c config.yaml run
+Restart=no
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

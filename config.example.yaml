@@ -1,0 +1,39 @@
+# cp config.example.yaml config.yaml
+# 인증키/DB 접속정보는 환경변수로 넣는 것을 권장:
+#   DATABASE_URL, SEOUL_API_KEY, GYEONGGI_API_KEY, INCHEON_API_KEY
+
+database_url: postgresql://postgres:postgres@localhost:5432/postgres
+db_schema: tmp
+
+# 공공데이터포털(data.go.kr) 인증키 — Decoding 키 권장. 보통 세 기관 모두 같은 키.
+seoul_api_key: ""
+gyeonggi_api_key: ""
+incheon_api_key: ""
+realtime_duration_hours: 24
+
+
+poll_interval_sec: 30    # 60으로 바꾸면 API 호출량 절반
+idle_interval_sec: 300
+idle_after_empty_polls: 10
+refresh_hour: 3          # 매일 03시 노선·정류장 재탐색
+
+max_concurrency_per_provider: 6
+daily_quota:             # 공공데이터포털 승인 트래픽 (초과 예상 시 시작 로그에 경고)
+  seoul: 100000
+  gyeonggi: 100000
+  incheon: 100000
+
+detector:
+  backtrack_tolerance: 2
+  trip_timeout_sec: 1800
+  max_interp_gap_sec: 600
+
+# 탐색 결과 보정
+exclude_route_names: []
+only_route_names: []
+include_routes: []
+#  - {provider: gyeonggi, route_id: "<GBIS routeId>", route_name: "<노선번호>"}   # 탐색에서 빠진 노선 수동 추가
+
+save_raw_positions: false
+poll_log_retention_days: 14
+log_level: INFO
