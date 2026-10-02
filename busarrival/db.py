@@ -22,7 +22,8 @@ class Database:
 
     @classmethod
     async def connect(cls, dsn: str, schema: str) -> "Database":
-        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, command_timeout=30)
+        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, command_timeout=30,
+                                         max_inactive_connection_lifetime=60)
         return cls(pool, schema)
 
     async def close(self) -> None:

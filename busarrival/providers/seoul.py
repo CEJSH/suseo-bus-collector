@@ -60,6 +60,11 @@ class SeoulProvider(BaseProvider):
             raise ApiError(f"seoul {path}: headerCd={code} {hdr.get('headerMsg')}")
         return as_list((data.get("msgBody") or {}).get("itemList"))
 
+    async def ars_within(self, lat, lon, radius_m):
+        """좌표 반경 내 정류장 ARS 목록."""
+        return [str(pick(r, "arsId")) for r in await self._call("stationinfo/getStationByPos", tmX=lon, tmY=lat, radius=radius_m)
+                if pick(r, "arsId") not in (None, "0")]
+
     async def nearest_ars(self, lat, lon, radius_m):
         """좌표 반경 내 가장 가까운 정류장의 ARS. 없으면 None."""
         rows = [r for r in await self._call("stationinfo/getStationByPos", tmX=lon, tmY=lat, radius=radius_m)
@@ -88,7 +93,7 @@ class SeoulProvider(BaseProvider):
                     seq=seq,
                     station_id=str(pick(r, "station", "stId")),
                     station_name=str(pick(r, "stationNm", default="")),
-                    ars_id=pick(r, "arsId"),
+                    ars_id=str(pick(r, "arsId", default="")).strip() or None,
                     lat=to_float(pick(r, "gpsY")),
                     lon=to_float(pick(r, "gpsX")),
                 )

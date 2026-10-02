@@ -95,6 +95,17 @@ class GyeonggiTest(unittest.TestCase):
         self.assertEqual([(p.vehicle_id, p.seq, p.section_frac) for p in ps], [("1", 3, 0.0), ("2", 7, None)])
 
 
+class ArsWhitespaceTest(unittest.TestCase):
+    @respx.mock
+    def test_gyeonggi_mobile_no_is_trimmed(self):
+        respx.get("https://apis.data.go.kr/6410000/busrouteservice/v2/getBusRouteStationListv2").respond(
+            json=gg_body("busRouteStationList", [
+                {"stationSeq": 1, "stationId": 1, "stationName": "a", "mobileNo": " 23406", "x": 127.1, "y": 37.4},
+                {"stationSeq": 2, "stationId": 2, "stationName": "b", "mobileNo": " ", "x": 127.1, "y": 37.5}]))
+        stops = run(call(GyeonggiProvider, "route_stops", "234000001"))
+        self.assertEqual([s.ars_id for s in stops], ["23406", None])
+
+
 class IncheonTest(unittest.TestCase):
     BASE = "https://apis.data.go.kr/6280000"
 

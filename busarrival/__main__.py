@@ -41,7 +41,7 @@ async def cmd_discover(cfg, dry_run: bool, replace: bool) -> None:
         try:
             routes, errors = await discover_targets(cfg, providers, db)
         finally:
-            await db.close()
+            await asyncio.wait_for(db.close(), 10)
     for e in errors:
         print(f"lookup error: {e}")
     for d in routes:

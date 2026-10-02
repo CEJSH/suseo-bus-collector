@@ -17,7 +17,8 @@ from .providers import ApiError
 log = logging.getLogger(__name__)
 
 TARGET_STOP_TYPE = "B"
-NEAREST_RADIUS_M = 40
+NEAREST_RADIUS_M = 60
+COLOCATED_RADIUS_M = 15  # 같은 위치에 번호만 다른 정류장 (예: 송파02 전용 23547 ↔ 23410)
 RETRIES = 4
 RETRY_DELAY_SEC = 5.0  # 서울 정류소 API는 연속 호출 시 간헐적으로 요청제한 오류를 준다
 PACE_SEC = 1.0  # 정류소 조회 사이 간격 (수집 중 위치 조회 속도에는 영향 없음)
@@ -51,14 +52,18 @@ async def _retry(fn, *args):
             await asyncio.sleep(RETRY_DELAY_SEC * (attempt + 1))
 
 
-async def target_candidates(stops: list[TargetStop], providers) -> tuple[list[RouteCandidate], list[str]]:
-    """(노선 후보, 오류 메시지). 일부 실패해도 나머지 후보는 돌려준다."""
+async def target_candidates(stops: list[TargetStop], providers
+                            ) -> tuple[list[RouteCandidate], list[str], dict[str, tuple[float, float]]]:
+    """(노선 후보, 오류 메시지, ARS별 대상 좌표). 일부 실패해도 나머지 후보는 돌려준다."""
     seoul, gyeonggi = providers.get(Provider.SEOUL), providers.get(Provider.GYEONGGI)
     errors: list[str] = []
+    coords: dict[str, tuple[float, float]] = {}
     ars_ids: set[str] = set()
     for s in stops:
         if s.ars_id:
             ars_ids.add(s.ars_id)
+            if s.lat is not None and s.lon is not None:
+                coords.setdefault(s.ars_id, (s.lat, s.lon))
             continue
         ars = None
         if seoul and s.lat is not None and s.lon is not None:
@@ -69,8 +74,21 @@ async def target_candidates(stops: list[TargetStop], providers) -> tuple[list[Ro
                 continue
         if ars:
             ars_ids.add(ars)
+            coords.setdefault(ars, (s.lat, s.lon))
         else:
             errors.append(f"{s.name}({s.lat},{s.lon}): no ARS within {NEAREST_RADIUS_M}m")
+
+    if seoul:
+        for ars, (lat, lon) in sorted(coords.items()):
+            try:
+                nearby = await _retry(seoul.ars_within, lat, lon, COLOCATED_RADIUS_M)
+            except ApiError as e:
+                errors.append(f"seoul near {ars}: {e}")
+                continue
+            for other in nearby:
+                if other not in ars_ids:
+                    ars_ids.add(other)
+                    coords.setdefault(other, (lat, lon))
 
     out: list[RouteCandidate] = []
     for ars in sorted(ars_ids):
@@ -81,7 +99,7 @@ async def target_candidates(stops: list[TargetStop], providers) -> tuple[list[Ro
                 errors.append(f"seoul {ars}: {e}")
         if gyeonggi:
             try:
-                station_id, _ = await _retry(gyeonggi.resolve_stop, ars, "")
+                station_id, _ = await _retry(gyeonggi.resolve_stop, ars, "", coords.get(ars))
             except ApiError as e:
                 if "no exact mobileNo match" not in str(e):  # 경기 BIS에 없는 서울 정류장은 정상
                     errors.append(f"gyeonggi {ars}: {e}")
@@ -92,8 +110,11 @@ async def target_candidates(stops: list[TargetStop], providers) -> tuple[list[Ro
                     out.append(c)
             except ApiError as e:
                 errors.append(f"gyeonggi {ars}: {e}")
+    # 버스 API가 노선을 하나도 모르는 번호(카드 데이터 전용 91xxx 등)는 ARS 보정에 쓰지 않는다
+    known = {c.source for c in out}
+    coords = {ars: xy for ars, xy in coords.items() if ars in known}
     for e in errors:
         log.warning("target lookup: %s", e)
     log.info("target stops: %d rows → %d ARS, %d route candidates, %d errors",
              len(stops), len(ars_ids), len(out), len(errors))
-    return out, errors
+    return out, errors, coords

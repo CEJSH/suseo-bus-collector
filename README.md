@@ -1,37 +1,35 @@
 # suseo-bus-collector
 
-`public.ent_bus_stop_capital`의 모든 정류장을 지나는 노선이 목표다. 원본 테이블은 읽기 전용이며 신규 적재는 `tmp`에만 한다.
+`card.suseo_target_sttn`에서 `sttn_type='B'`인 정류장(수서역 일대)을 지나는 **모든 노선**의 실제 도착시각을 실시간 버스 위치 API로 추정해 `tmp.arrival_event`에 적재한다. 원본 테이블은 읽기만 한다.
 
-- 서울: T-DATA **배차 정류장별 이력**을 날짜별 적재한다. 월 1회 갱신이며 별도 T-DATA 키가 필요하다.
-- 경기·인천: 기존 정류장/노선 매핑을 바탕으로 위치 API를 **시작 후 24시간** 수집하여 도착시각을 추정한다. 00~24시 달력 날짜와는 다르다.
-- 실시간 추정과 서울 원본 이력은 다른 테이블에 저장한다. 기존 서울 추정 기록은 삭제하지 않는다.
+- 대상 노선 탐색: 정류장 ARS로 서울 `getRouteByStation`, 경기 `getBusStationListv2`→`getBusStationViaRouteListv2`를 조회한다. ARS가 없는 정류장은 서울 좌표 검색(60m)으로 가장 가까운 ARS를 쓴다.
+- ARS는 지역 간 중복된다(예: 경기 `23403`은 남양주 정류장). 경기 정류장과 이름으로만 찾은 노선은 **대상 정류장 좌표 150m 안**일 때만 인정한다.
+- 카드 노선–정류장 표(`card.routesttn`, 2025-03-19)와 대조해 빠진 노선이 없음을 확인했다. 카드에만 있는 16번은 현재 같은 번호 노선이 모두 수서역에서 2.9km 이상 떨어져 있다.
+- 서울 시스템이 수서역5번출구(`23409`)에 연결해 둔 남양주·광주 노선 7개(100, 105, 2000, 2000-1, 202, 23, 9)는 GBIS 정류장 목록상 수서역에서 2.9km 이상 떨어져 있어 제외된다(2026-10-02 확인).
+- 대상 정류장 좌표 15m 안에 붙은 다른 번호의 정류장도 조회한다. 송파02는 `23410`에서 8m 떨어진 `23547`에만, 송파03은 `23548`과 `23871`에 등록되어 있다. 이 노선들의 도착은 그 번호로 기록되므로 대상 정류장 분석 시 함께 포함한다.
+- GBIS 노선 정류장 목록에서 서울 정류장 번호가 비어 있으면 대상 정류장 50m 안의 ARS로 채운다.
+- 카드 데이터의 `91111`·`91112`·`91117`·`91119`는 GBIS상 `23406`·`23407`·`23401`·`23410`과 같은 위치(0m)의 같은 정류장이다. 분석 시 이 ARS로 바꿔 조회한다.
+- 경기 API의 `mobileNo`는 앞에 공백이 붙어 오므로 저장 전에 공백을 제거한다.
+- 서울 T-DATA 이력은 날짜가 달라도 시각이 같고 첫차·막차 위주라 계획 데이터로 판단해 제거했다.
 
-## 새 수집 명령
+## 실행
 
 ```bash
-# 기존 SEOUL_API_KEY 사용. SEOUL_HISTORY_API_KEY가 있으면 우선 사용.
-# 제공 가능한 날짜를 지정
-python -m busarrival import-seoul-history --date 20211219
-# 위 날짜는 문서 예시일 뿐이며 실제 제공 여부는 확인 필요
-
-# 경기·인천 매핑 및 노선 준비 (원본 정류장 조회 API로 대상 탐색하지 않음)
-python -m busarrival map-stops --provider gyeonggi --provider incheon
-python -m busarrival map-routes --provider gyeonggi --provider incheon
-python -m busarrival discover --provider gyeonggi --provider incheon
-python -m busarrival run --hours 24
+python -m busarrival discover --dry-run   # 대상 노선과 예상 호출량 확인 (저장 안 함)
+python -m busarrival discover --replace   # 저장 + 이번에 안 나온 기존 노선 비활성화 (조회 오류가 있으면 거부)
+python -m busarrival run --hours 65       # 시작 시 탐색(병합 저장) 후 수집. 매일 03시 재탐색
 ```
 
-`run`은 서울 위치 API를 호출하지 않는다. 기본 경기·인천 양쪽 키가 필요하고, 요청한 기관의 노선이 하나도 없으면 실패한다. 한 기관만 실행하려면 `--provider gyeonggi`처럼 명시한다. 종료 시 진행 중인 사이클과 DB 저장을 마치므로 24시간보다 약간 늦게 종료될 수 있다. 재실행은 새로운 24시간이다. systemd는 자동 재시작하지 않는다.
-
-서울 신규 테이블: `tmp.seoul_stop_history`(원본·도착/출발 일시), `tmp.seoul_history_route_import`(날짜·노선별 페이지 체크포인트). 페이지 저장과 체크포인트는 원자적이며 재실행 시 이어받는다. 첫 페이지가 비어 있으면 완료로 표시하지 않아 미공개 자료를 나중에 다시 조회할 수 있다. 동일 원문은 중복 저장하지 않고, 원문이 바뀌면 별도 버전으로 보존한다. 분석 시 같은 운행의 수정 레코드를 구분해야 한다.
-
-실제 API는 문서와 달리 `routeId`를 필수로 요구한다(2026-10-01 확인). 기본은 `tmp.route`에 저장된 서울 활성 노선별 조회이며, `--route-id`를 반복 지정해 대상을 제한할 수 있다. 캐시에 없는 과거 폐지 노선은 포함되지 않으므로 전수 이력을 보장하지 않는다. 알 수 없는 응답 구조는 중단한다. 서울 역사적 `sttnId`는 ARS가 아니다. 원본 이력을 먼저 보존하며, `ent_bus_stop_capital` 연결은 검증된 역사적 정류장 ID 매핑이 추가로 필요하다. 기존 노선/정류장 매핑의 미완료·기관 장애로 경기·인천 전수 커버리지도 아직 보장되지 않는다.
+- 기관별 주기는 `poll_interval_sec`(기본 30초) 이상이면서 24시간 호출이 `daily_quota`의 90% 안에 들도록 자동으로 늘어난다.
+- 기관별 하루 호출 수가 `daily_quota`에 닿으면 자정까지 해당 기관 조회를 멈춘다(`poll_log.error='local daily budget reached'`).
+- 서울 정류소 API는 연속 호출 시 요청제한 오류를 주므로 탐색 조회는 1초 간격, 실패 시 재시도한다.
+- **PC가 절전에 들어가면 수집도 멈춘다.** 수집 기간에는 절전을 끈다.
 
 ## 동작 방식
 
 ```
-[매일 03시] 탐색 (discovery)
-  tmp.bus_stop_route_map 캐시 → 수도권 전체 대상 노선
+[시작 시 + 매일 03시] 탐색
+  card.suseo_target_sttn(B) 정류장 → 경유 노선 후보 → 관할 기관 노선 ID
   → 관할 기관 API로 노선 전체 정류장 목록 (+ 좌표 누적거리)          → route, route_stop
 
 [30초마다] 수집 (collector)
@@ -63,20 +61,15 @@ export GYEONGGI_API_KEY=...   # 경기도 정류소/노선/버스위치 조회 �
 export INCHEON_API_KEY=...    # 인천광역시 버스노선/버스위치 조회 서비스
 
 python -m busarrival init-db
-python -m busarrival map-stops --limit 100  # 검증 배치: public 읽기, tmp 매핑 적재
-python -m busarrival map-stops              # 미처리/오류 행 재개
-python -m busarrival map-routes             # 기관 내부 ID로 경유 노선 캐시 구축
 python -m busarrival discover --dry-run       # 대상 노선 확인 + 일일 호출량 추정
 python -m busarrival probe seoul 100100xxx    # 원시 응답 확인 (필드명 검증)
-python -m busarrival discover
 python -m busarrival run
 ```
 
 운영은 `deploy/busarrival.service`(systemd)를 참고한다. SIGTERM을 받으면 현재 사이클을 마치고 종료한다.
 
 ## 트래픽(쿼터)
-노선 1개를 30초 주기로 수집하면 하루 2,880회를 호출한다. 수서역 경유 노선이 서울 20개·경기 10개라면 서울 약 5.8만 회, 경기 약 2.9만 회/일이다.
-개발계정 기본 한도(보통 1,000회/일)로는 부족하므로 **운영계정 트래픽 증설을 신청**하거나 `poll_interval_sec: 60`을 쓴다.
+노선 1개를 30초 주기로 수집하면 하루 2,880회를 호출한다. 2026-10-02 기준 대상은 서울 20개·경기 17개로, 서울 약 5.8만 회, 경기 약 4.9만 회/일이다(한도 각 10만 회).
 심야처럼 차량이 없는 노선은 자동으로 5분 주기로 줄어든다. 시작 로그와 `discover --dry-run`이 추정 호출량을 보여준다.
 
 ## 주요 테이블 (`tmp` 스키마)
@@ -95,12 +88,26 @@ SELECT route_name, arrived_at, window_end - window_start AS uncertainty, method
 FROM tmp.arrival_event
 WHERE ars_id = '23xxx' AND service_date = current_date
 ORDER BY arrived_at;
+
+-- 운행일별 대상 정류장 커버리지: 정류장(ARS)·노선별 도착 건수
+SELECT e.service_date, t.sttn_ars_num, e.route_name, count(*) AS arrivals
+FROM (SELECT DISTINCT sttn_ars_num FROM card.suseo_target_sttn WHERE sttn_type = 'B') t
+JOIN tmp.arrival_event e ON e.ars_id = t.sttn_ars_num
+JOIN tmp.route r ON r.provider = e.provider AND r.route_id = e.route_id AND r.active
+GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+
+-- 결측 구간: 노선별 호출 실패/예산 초과
+SELECT provider, route_id, date_trunc('hour', polled_at) AS hour, count(*) FILTER (WHERE NOT ok) AS failed, count(*)
+FROM tmp.poll_log WHERE polled_at > now() - interval '1 day'
+GROUP BY 1, 2, 3 HAVING count(*) FILTER (WHERE NOT ok) > 0 ORDER BY 3, 1, 2;
 ```
+
+경기 노선의 정류장 `ars_id`는 GBIS `mobileNo`이며, 서울 정류장의 경우 서울 ARS와 같다.
 
 ## 주의
 - API 필드명은 공공데이터포털 명세 기준으로 작성했고, 대소문자·후보 키를 관대하게 읽도록 했다. 인증키를 받은 뒤 `probe`로 실제 응답을 한 번 확인할 것.
   - 서울 `sectOrd`가 '마지막 통과 정류장 순번'과 1만큼 어긋나면 `providers/seoul.py`에서 보정한다.
-- 인천 API는 서울 소재 정류장 주변 검색을 지원하지 않는다. 그래서 인천 노선은 서울·경기 API의 경유노선 목록에 나온 이름으로 인천 API를 검색하고, 그중 실제로 수서역 반경을 지나는 노선만 채택한다.
+- 인천 노선은 서울·경기 API의 경유노선 목록에 나온 이름으로 인천 API를 검색하고, 그중 실제로 대상 정류장(ARS·좌표)을 지나는 노선만 채택한다. 2026-10-02 기준 대상 인천 노선은 없다.
 - 수집량이 많아지면 `arrival_event`를 `service_date` 기준 월별 파티션으로 나누는 것을 고려한다.
 
 ## 테스트

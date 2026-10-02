@@ -12,13 +12,13 @@ import re
 from dataclasses import dataclass
 
 from .config import Config
-from .geo import fill_cumulative_distance
+from .geo import fill_cumulative_distance, haversine_m
 from .models import Provider, RouteCandidate, RouteRef, RouteStop
 from .providers import ApiError, BaseProvider
 
 log = logging.getLogger(__name__)
 
-PROXIMITY_SLACK_M = 150  # 이름 검색으로 찾은 노선의 반경 판정 여유
+MATCH_RADIUS_M = 150  # ARS는 지역 간 중복되므로 대상 정류장 좌표와도 맞아야 한다
 
 
 @dataclass
@@ -28,12 +28,37 @@ class DiscoveredRoute:
     sources: list[str]
 
 
+def stop_matches_target(stop: RouteStop, ars_ids: set[str] | list[str],
+                        coords: dict[str, tuple[float, float]]) -> bool:
+    ars = (stop.ars_id or "").strip()
+    if not ars or ars not in ars_ids:
+        return False
+    target = coords.get(ars)
+    if target is None or stop.lat is None or stop.lon is None:
+        return target is None  # 좌표를 모르는 대상만 ARS 일치로 인정
+    return haversine_m(target[0], target[1], stop.lat, stop.lon) <= MATCH_RADIUS_M
+
+
+FILL_RADIUS_M = 50  # GBIS 노선 정류장 목록은 서울 정류장의 mobileNo를 비워 두는 경우가 많다
+
+
+def fill_missing_ars(stops: list[RouteStop], coords: dict[str, tuple[float, float]]) -> None:
+    """ARS가 빈 정류장에 FILL_RADIUS_M 안의 가장 가까운 대상 정류장 ARS를 채운다 (ARS 기준 조회용)."""
+    for s in stops:
+        if s.ars_id or s.lat is None or s.lon is None:
+            continue
+        best = min(((haversine_m(lat, lon, s.lat, s.lon), ars) for ars, (lat, lon) in coords.items()), default=None)
+        if best and best[0] <= FILL_RADIUS_M:
+            s.ars_id = best[1]
+
+
 def norm_name(name: str) -> str:
     return re.sub(r"[\s\-_]", "", name or "").upper()
 
 
 async def discover_routes(cfg: Config, providers: dict[Provider, BaseProvider],
-                          candidates: list[RouteCandidate]) -> list[DiscoveredRoute]:
+                          candidates: list[RouteCandidate],
+                          coords: dict[str, tuple[float, float]] | None = None) -> list[DiscoveredRoute]:
     candidates = list(candidates)
 
     for m in cfg.include_routes:
@@ -62,6 +87,7 @@ async def discover_routes(cfg: Config, providers: dict[Provider, BaseProvider],
         key = (ref.provider, ref.route_id)
         if key not in stops_cache:
             stops = await providers[ref.provider].route_stops(ref.route_id)
+            fill_missing_ars(stops, coords or {})
             fill_cumulative_distance(stops)
             stops_cache[key] = stops
         return stops_cache[key]
@@ -90,7 +116,7 @@ async def discover_routes(cfg: Config, providers: dict[Provider, BaseProvider],
             except ApiError as e:
                 log.error("stops %s/%s failed: %s", prov.value, ref.route_id, e)
                 continue
-            if any(s.ars_id and s.ars_id.strip() in srcs for s in stops):
+            if any(stop_matches_target(s, srcs, coords or {}) for s in stops):
                 resolved[(prov, ref.route_id)] = (ref, list(srcs))
                 hit = True
         if not hit:

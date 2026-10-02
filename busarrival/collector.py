@@ -84,8 +84,8 @@ def estimate_daily_calls(cfg: Config, routes: list[DiscoveredRoute]) -> dict[str
 
 
 async def discover_targets(cfg: Config, providers, db) -> tuple[list[DiscoveredRoute], list[str]]:
-    candidates, errors = await target_candidates(await db.target_stops(), providers)
-    return await discover_routes(cfg, providers, candidates), errors
+    candidates, errors, coords = await target_candidates(await db.target_stops(), providers)
+    return await discover_routes(cfg, providers, candidates, coords), errors
 
 
 class Collector:

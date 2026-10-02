@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from ..geo import haversine_m
 from ..models import Provider, RouteCandidate, RouteRef, RouteStop, VehiclePosition
 from .base import ApiError, BaseProvider, as_list, pick, to_float, to_int
 
@@ -15,6 +16,14 @@ BASE = "https://apis.data.go.kr/6410000"
 _DISTRICT = {"1": Provider.SEOUL, "2": Provider.GYEONGGI, "3": Provider.INCHEON}
 # stateCd: 0 교차로 통과, 1 정류소 도착, 2 정류소 출발
 _STATE_FRAC = {"1": 0.0, "2": 0.05}
+
+
+MATCH_RADIUS_M = 150
+
+
+def _within(row: dict, near: tuple[float, float]) -> bool:
+    lat, lon = to_float(pick(row, "y")), to_float(pick(row, "x"))
+    return lat is not None and lon is not None and haversine_m(near[0], near[1], lat, lon) <= MATCH_RADIUS_M
 
 
 def provider_from_route_id(route_id: str) -> Provider:
@@ -29,7 +38,9 @@ def provider_from_route_id(route_id: str) -> Provider:
 class GyeonggiProvider(BaseProvider):
     provider = Provider.GYEONGGI
 
-    async def resolve_stop(self, ars_id, station_name):
+    async def resolve_stop(self, ars_id, station_name, near=None):
+        """ARS(mobileNo)로 경기 stationId를 찾는다. ARS는 지역 간 중복되므로 near=(lat, lon)가 있으면
+        그 좌표에서 MATCH_RADIUS_M 안의 정류장만 인정한다."""
         if not ars_id:
             raise ApiError("gyeonggi: ARS/mobile number missing")
         numbers = {n.strip() for n in ars_id.split('|') if n.strip()}
@@ -37,7 +48,8 @@ class GyeonggiProvider(BaseProvider):
         for number in sorted(numbers):
             rows.extend(as_list(await self._call("busstationservice/v2/getBusStationListv2", "busStationList", keyword=number)))
         matches = {str(pick(row, "stationId")): row for row in rows
-                   if pick(row, "stationId") and str(pick(row, "mobileNo", default="")).strip() in numbers}
+                   if pick(row, "stationId") and str(pick(row, "mobileNo", default="")).strip() in numbers
+                   and (near is None or _within(row, near))}
         if len(matches) == 1:
             sid, row = next(iter(matches.items()))
             return sid, str(pick(row, "stationName", default=station_name))
@@ -110,7 +122,7 @@ class GyeonggiProvider(BaseProvider):
                     seq=seq,
                     station_id=str(pick(r, "stationId")),
                     station_name=str(pick(r, "stationName", default="")),
-                    ars_id=pick(r, "mobileNo"),
+                    ars_id=str(pick(r, "mobileNo", default="")).strip() or None,
                     lat=to_float(pick(r, "y")),
                     lon=to_float(pick(r, "x")),
                 )
